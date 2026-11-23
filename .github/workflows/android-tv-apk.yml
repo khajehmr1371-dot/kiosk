@@ -87,6 +87,23 @@ jobs:
           sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R107-PILOT.apk > dist/SHA256SUMS.txt
           cp /tmp/bastiyan-apk-badging.txt dist/apk-badging.txt
           echo 'R107: dual API path and X-Session-Token fallback. Installable debug-signed pilot build. No installed browser, Chrome, WebView2 or Android Studio required on the Android TV. API connection needs a reachable HTTPS kiosk server.' > dist/README.txt
+      - name: Build safe side-by-side Android TV APK without replacing R105
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/source/Bastiyan-Android-TV-Native-R105"
+          sed -i "s/applicationId 'ir.bastiyan.kiosk.display'/applicationId 'ir.bastiyan.kiosk.display.pilot107'/" "$APP/app/build.gradle"
+          sed -i 's/android:label="باستیان | نمایشگر"/android:label="باستیان | نمایشگر R107 تست"/' "$APP/app/src/main/AndroidManifest.xml"
+          (cd "$APP" && gradle --no-daemon --stacktrace :app:assembleDebug)
+          APK="$APP/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK" | tail -1
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > /tmp/bastiyan-apk-side-by-side.txt
+          grep "package: name='ir.bastiyan.kiosk.display.pilot107'" /tmp/bastiyan-apk-side-by-side.txt
+          grep "versionCode='107'" /tmp/bastiyan-apk-side-by-side.txt
+          cp "$APK" dist/Bastiyan-Kiosk-AndroidTV-Native-R107-SafeSideBySide.apk
+          sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R107-SafeSideBySide.apk >> dist/SHA256SUMS.txt
       - name: Upload real Android APK as artifact
         uses: actions/upload-artifact@v4
         with:
