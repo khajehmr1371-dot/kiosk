@@ -1,0 +1,448 @@
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -7,8 +7,8 @@
+         applicationId 'ir.bastiyan.kiosk.display'
+         minSdk 23
+         targetSdk 34
+-        versionCode 105
+-        versionName '1.0.5-R105'
++        versionCode 107
++        versionName '1.0.7-R107'
+     }
+     buildTypes {
+         release { minifyEnabled false }
+--- a/app/src/main/java/ir/bastiyan/kiosk/display/EndpointResolver.java
++++ b/app/src/main/java/ir/bastiyan/kiosk/display/EndpointResolver.java
+@@ -0,0 +1,42 @@
++package ir.bastiyan.kiosk.display;
++
++import java.net.URI;
++import java.util.Locale;
++
++/** Pure-Java safe URL resolution for the two official PHP Kiosk API entrypoints. */
++public final class EndpointResolver {
++    private EndpointResolver() {}
++    public static String normalizeBase(String raw) {
++        try {
++            URI u=new URI(raw==null?"":raw.trim());
++            if(!"https".equalsIgnoreCase(u.getScheme())||u.getHost()==null||
++               u.getRawUserInfo()!=null||u.getRawFragment()!=null||
++               (u.getPort()!=-1 && u.getPort()!=443))throw new IllegalArgumentException();
++            String path=u.getRawPath()==null?"":u.getRawPath();
++            if(path.contains("%")||path.contains("\\")||path.contains("//")||
++               path.contains("/../")||path.endsWith("/..")||path.contains("/./")||
++               !path.matches("[a-zA-Z0-9_./-]*"))throw new IllegalArgumentException();
++            String query=u.getRawQuery();
++            if(query!=null && !(path.endsWith("/api.php") && query.matches("route=(?:health|state)")))
++                throw new IllegalArgumentException();
++            path=path.replaceFirst("/+(?:api/(?:health|state)|api(?:/)?|api\\.php|login(?:\\.html)?|tv(?:\\.html)?|admin|android-tv(?:\\.html)?|display-install)(?:/)?$","");
++            while(path.endsWith("/"))path=path.substring(0,path.length()-1);
++            String host=u.getHost().toLowerCase(Locale.ROOT);
++            if(host.indexOf(':')>=0)host="["+host+"]";
++            return "https://"+host+path;
++        }catch(Exception e) {
++            throw new IllegalArgumentException("نشانی سرور نامعتبر است. آدرس HTTPS سامانه، مانند https://example.ir، را وارد کنید (بدون رمز یا پارامتر)");
++        }
++    }
++    public static String endpoint(String base,boolean directPhp,String route) {
++        if(route==null||!route.matches("[a-zA-Z0-9/_-]+(?:\\?[a-zA-Z0-9_=&-]+)?"))
++            throw new IllegalArgumentException("مسیر API معتبر نیست");
++        return directPhp ? base+"/api.php?route="+route.replace('?', '&') : base+"/api/"+route;
++    }
++    public static String media(String base,boolean directPhp,String path) {
++        if(path==null || !path.matches("/api/media/file\\?centerId=[a-zA-Z0-9_%.-]+&mediaId=[a-zA-Z0-9_-]+"))
++            throw new IllegalArgumentException("نشانی رسانه مجاز نیست");
++        if(!directPhp)return base+path;
++        return base+"/api.php?route=media/file&"+path.substring(path.indexOf('?')+1);
++    }
++}
+--- a/app/src/main/java/ir/bastiyan/kiosk/display/KioskApi.java
++++ b/app/src/main/java/ir/bastiyan/kiosk/display/KioskApi.java
+@@ -5,98 +5,136 @@
+ import java.io.InputStream;
+ import java.io.OutputStream;
+ import java.net.HttpURLConnection;
+-import java.net.URI;
+ import java.net.URL;
+ import java.nio.charset.StandardCharsets;
+ import java.util.Locale;
+ 
+-/** Only HTTPS, same-origin, official Bastiyan Kiosk API. No WebView or browser. */
++/** Direct TLS-to-PHP Kiosk API; no WebView, HTTP fallback, proxy, or LAN relay. */
+ public final class KioskApi {
+     public static final class ApiException extends Exception {
+         public final int httpStatus;
+-        ApiException(String message, int status){ super(message); httpStatus=status; }
++        public final String phase;
++        ApiException(String message,int status,String stage){super(message);httpStatus=status;phase=stage;}
+     }
+-    private final String origin;
+-    public KioskApi(String raw){ origin=normalizeOrigin(raw); }
+-    public String origin(){ return origin; }
++    private final String base;
++    private Boolean directPhp=null;
++    public KioskApi(String raw){base=EndpointResolver.normalizeBase(raw);}
++    public String origin(){return base;}
++    public String routeMode(){return directPhp==null?"در انتظار آزمایش":(directPhp?"PHP مستقیم":"/api");}
++    public String mediaUrl(String path){return EndpointResolver.media(base,Boolean.TRUE.equals(directPhp),path);}
+ 
+-    public static String normalizeOrigin(String raw){
+-        try {
+-            URI uri=new URI(raw==null?"":raw.trim());
+-            if(!"https".equalsIgnoreCase(uri.getScheme())||uri.getHost()==null||
+-                uri.getRawUserInfo()!=null||uri.getRawQuery()!=null||uri.getRawFragment()!=null||
+-                (uri.getRawPath()!=null&&!uri.getRawPath().isEmpty()&&!"/".equals(uri.getRawPath()))||
+-                (uri.getPort()!=-1&&uri.getPort()!=443)) throw new IllegalArgumentException();
+-            return "https://"+uri.getHost().toLowerCase(Locale.ROOT);
+-        }catch(Exception e){ throw new IllegalArgumentException("نشانی باید HTTPS اصلی سامانه، بدون مسیر اضافی یا رمز باشد"); }
+-    }
+-    private JSONObject request(String route, String token, JSONObject payload) throws Exception {
++    private JSONObject makeRequest(String route,String token,JSONObject payload,boolean php,String stage)throws Exception{
+         HttpURLConnection c=null;
+-        try {
+-            URL url=new URL(origin+"/api/"+route);
++        try{
++            URL url=new URL(EndpointResolver.endpoint(base,php,route));
+             c=(HttpURLConnection)url.openConnection();
+-            c.setInstanceFollowRedirects(false);
+-            c.setConnectTimeout(8000); c.setReadTimeout(10000);
+-            c.setUseCaches(false);
+-            c.setRequestProperty("Accept","application/json");
+-            c.setRequestProperty("User-Agent","BastiyanKioskNativeAndroidTV/1.0.5");
+-            if(token!=null&&!token.isEmpty())c.setRequestProperty("Authorization","Bearer "+token);
++            c.setInstanceFollowRedirects(false);c.setConnectTimeout(9000);c.setReadTimeout(12000);
++            c.setUseCaches(false);c.setRequestProperty("Accept","application/json");
++            c.setRequestProperty("User-Agent","BastiyanKioskNativeAndroidTV/1.0.7");
++            if(token!=null&&!token.isEmpty()){
++                c.setRequestProperty("Authorization","Bearer "+token);
++                // Apache/FPM deployments sometimes strip Authorization. The official
++                // kiosk bearer() handler explicitly accepts this alternate header.
++                c.setRequestProperty("X-Session-Token","Bearer "+token);
++            }
+             c.setRequestMethod(payload==null?"GET":"POST");
+             if(payload!=null){
+-                byte[] b=payload.toString().getBytes(StandardCharsets.UTF_8);
+-                if(b.length>16384)throw new ApiException("درخواست بیش از حد بزرگ است",0);
++                byte[] bytes=payload.toString().getBytes(StandardCharsets.UTF_8);
++                if(bytes.length>16384)throw new ApiException("درخواست بزرگ‌تر از حد مجاز است",0,stage);
+                 c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json; charset=UTF-8");
+-                c.setFixedLengthStreamingMode(b.length);
+-                try(OutputStream out=c.getOutputStream()){out.write(b);}
++                c.setFixedLengthStreamingMode(bytes.length);
++                try(OutputStream out=c.getOutputStream()){out.write(bytes);}
+             }
+-            int code=c.getResponseCode();
+-            if(code>=300&&code<400)throw new ApiException("سرور درخواست را به نشانی دیگری هدایت کرد؛ آدرس سامانه را بررسی کنید",code);
++            int status=c.getResponseCode();
++            if(status>=300&&status<400)
++                throw new ApiException("هدایت HTTP "+status+"؛ نشانی سرویس یا تنظیمات HTTPS نادرست است",status,stage);
+             String type=c.getContentType();
+             if(type==null||!type.toLowerCase(Locale.ROOT).contains("json"))
+-                throw new ApiException("به جای API، پاسخ غیر JSON دریافت شد؛ آدرس یا تنظیمات سرویس اشتباه است (HTTP "+code+")",code);
+-            byte[] data;
+-            try(InputStream in=code>=400?c.getErrorStream():c.getInputStream()){
+-                if(in==null)throw new ApiException("پاسخی از سرور دریافت نشد",code);
+-                ByteArrayOutputStream buffer=new ByteArrayOutputStream(); byte[] b=new byte[8192];int n;
+-                while((n=in.read(b))!=-1){if(buffer.size()+n>2_000_000)throw new ApiException("پاسخ سرور بیش از حد بزرگ است",code);buffer.write(b,0,n);}
+-                data=buffer.toByteArray();
++                throw new ApiException("پاسخ JSON نیست (HTTP "+status+")؛ این مسیر به API واقعی کیوسک نمی‌رسد",status,stage);
++            ByteArrayOutputStream bytes=new ByteArrayOutputStream();
++            try(InputStream in=status>=400?c.getErrorStream():c.getInputStream()){
++                if(in==null)throw new ApiException("پاسخ سرور خالی است (HTTP "+status+")",status,stage);
++                byte[] b=new byte[8192];int n;
++                while((n=in.read(b))!=-1){
++                    if(bytes.size()+n>2_000_000)throw new ApiException("پاسخ API بزرگ‌تر از حد انتظار است",status,stage);
++                    bytes.write(b,0,n);
++                }
+             }
+-            JSONObject j=new JSONObject(new String(data,StandardCharsets.UTF_8));
+-            if(code>=400||j.optBoolean("success",true)==false){
+-                String message=j.optString("error",j.optString("message","HTTP "+code));
+-                throw new ApiException(message,code);
++            JSONObject j;
++            try{j=new JSONObject(new String(bytes.toByteArray(),StandardCharsets.UTF_8));}
++            catch(Exception e){throw new ApiException("JSON دریافتی معتبر نیست (HTTP "+status+")",status,stage);}
++            if(status>=400||!j.optBoolean("success",true)){
++                String message=j.optString("error",j.optString("message","HTTP "+status));
++                throw new ApiException(message,status,stage);
+             }
+             return j;
+         }finally{if(c!=null)c.disconnect();}
+     }
+-    public JSONObject health()throws Exception{
+-        JSONObject j=request("health",null,null);
+-        if(!"ok".equals(j.optString("status"))||!"bastian_clinic_queue_system".equals(j.optString("service")))
+-            throw new ApiException("این نشانی به سرور اصلی کیوسک باستیان متصل نیست",0);
+-        return j;
++
++    public synchronized JSONObject health()throws Exception{
++        if(directPhp!=null)return makeRequest("health",null,null,directPhp,"health");
++        Exception first=null,second=null;
++        for(boolean mode:new boolean[]{false,true}){
++            try{
++                JSONObject j=makeRequest("health",null,null,mode,"health");
++                if(!"ok".equals(j.optString("status")) ||
++                   !"bastian_clinic_queue_system".equals(j.optString("service")))
++                    throw new ApiException("سرویس پاسخ داده، اما API متعلق به کیوسک باستیان نیست",0,"health");
++                directPhp=mode;
++                return j;
++            }catch(Exception e){if(first==null)first=e;else second=e;}
++        }
++        String a=describeProbe(first),b=describeProbe(second);
++        throw new ApiException("سامانه کیوسک در هیچ‌یک از دو مسیر API پاسخ معتبر نداد؛ /api/health: "+a+" | api.php: "+b,0,"health");
++    }
++    private String describeProbe(Exception e){
++        if(e==null)return "نامشخص";
++        if(e instanceof ApiException){ApiException a=(ApiException)e;
++            return "HTTP "+a.httpStatus+" — "+truncate(a.getMessage(),75);}
++        return truncate(e.getClass().getSimpleName()+": "+String.valueOf(e.getMessage()),75);
++    }
++    private static String truncate(String s,int max){return s.length()>max?s.substring(0,max):s;}
++    private JSONObject request(String route,String token,JSONObject payload,String stage)throws Exception{
++        if(directPhp==null)health();
++        try{return makeRequest(route,token,payload,directPhp,stage);}
++        catch(ApiException first){
++            if(first.httpStatus!=404 || !("state".equals(stage)||"poll".equals(stage)))throw first;
++            // An upstream proxy may stop rewriting /api while api.php still works.
++            boolean old=directPhp;directPhp=null;
++            try{
++                health();
++                if(directPhp==old)throw first;
++                return makeRequest(route,token,payload,directPhp,stage);
++            }catch(Exception e){
++                if(directPhp==null)directPhp=old;
++                throw e;
++            }
++        }
+     }
+     public JSONObject login(String username,String password)throws Exception{
+-        JSONObject p=new JSONObject();p.put("username",username);p.put("password",password);
+-        JSONObject j=request("auth/display-login",null,p);
++        JSONObject p=new JSONObject().put("username",username).put("password",password);
++        JSONObject j=request("auth/display-login",null,p,"login");
+         if(!j.optBoolean("success",false)||!"display".equals(j.optString("role"))||
+            j.optString("token").length()<24||j.optString("centerId").isEmpty())
+-            throw new ApiException("سرور نشست معتبر مخصوص نمایشگر صادر نکرد",0);
++            throw new ApiException("سرور نشست معتبر مخصوص نمایشگر صادر نکرد",0,"login");
+         return j;
+     }
+     public JSONObject state(String token,String centerId)throws Exception{
+-        JSONObject j=request("state",token,null);
++        JSONObject j=request("state",token,null,"state");
+         if(!j.optBoolean("success",false)||!"display".equals(j.optString("authRole"))||
+            !centerId.equals(j.optString("centerId"))||j.optJSONArray("doctors")==null||j.optJSONArray("queues")==null)
+-            throw new ApiException("نشست یا داده دریافتی با نمایشگر این مرکز مطابقت ندارد",403);
++            throw new ApiException("داده‌های صف یا هویت مرکز با حساب نمایشگر تطبیق ندارند",403,"state");
+         return j;
+     }
+     public JSONObject poll(String token,long version)throws Exception{
+-        return request("sync/poll?version="+Math.max(0,version),token,null);
++        return request("sync/poll?version="+Math.max(0,version),token,null,"poll");
+     }
+     public void complete(String token,String callId)throws Exception{
+         JSONObject p=new JSONObject().put("callId",callId);
+-        JSONObject j=request("announcements/complete",token,p);
+-        if(!j.optBoolean("success",false))throw new ApiException("تأیید فراخوان به سرور نرسید",0);
++        JSONObject j=request("announcements/complete",token,p,"ack");
++        if(!j.optBoolean("success",false))throw new ApiException("تأیید فراخوان به سرور نرسید",0,"ack");
+     }
+-    public void keepalive(String token)throws Exception{request("session/keepalive",token,new JSONObject());}
++    public void keepalive(String token)throws Exception{
++        request("session/keepalive",token,new JSONObject(),"keepalive");
++    }
+ }
+--- a/app/src/main/java/ir/bastiyan/kiosk/display/MainActivity.java
++++ b/app/src/main/java/ir/bastiyan/kiosk/display/MainActivity.java
+@@ -137,6 +137,9 @@
+         TextView urlLabel=label("نشانی HTTPS سامانه کیوسک",tv?18:15,TEXT,true);append(form,urlLabel,36);
+         serverField=field("https://your-kiosk.example",vault.server(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
+         append(form,serverField,55);
++        Button testServer=button("آزمایش آدرس سرور — بدون ورود یا رمز");
++        append(form,testServer,tv?49:44);
++        testServer.setOnClickListener(v->testServer(testServer));
+         TextView userLabel=label("نام کاربری نمایشگر مرکز",tv?18:15,TEXT,true);append(form,userLabel,40);
+         userField=field("نام کاربری مرکز",vault.username(),InputType.TYPE_CLASS_TEXT);append(form,userField,55);
+         TextView passLabel=label("رمز عبور اختصاصی نمایشگر",tv?18:15,TEXT,true);append(form,passLabel,40);
+@@ -151,6 +154,28 @@
+         // TV remote: each editable input and the final button use native D-pad focus.
+         if(tv)serverField.requestFocus();
+     }
++    private void testServer(Button button){
++        if(loginBusy)return;
++        final KioskApi candidate;
++        try{candidate=new KioskApi(serverField.getText().toString());}
++        catch(Exception e){setupError.setText(e.getMessage());return;}
++        loginBusy=true;button.setEnabled(false);
++        setupError.setText("در حال بررسی سرور بدون ارسال رمز عبور…");
++        io.execute(()->{
++            try{
++                candidate.health();
++                ui.post(()->{
++                    loginBusy=false;button.setEnabled(true);
++                    setupError.setText("✓ سرور واقعی کیوسک پاسخ داد. مسیر: "+candidate.routeMode()+
++                        " — برای مشاهده صف از نام کاربری و رمز خودِ مرکز استفاده کنید.");
++                });
++            }catch(Exception e){
++                final String reason=humanError(e);
++                ui.post(()->{loginBusy=false;button.setEnabled(true);
++                    setupError.setText("آزمایش سرور ناموفق: "+reason);});
++            }
++        });
++    }
+     private void signIn(Button button){
+         if(loginBusy)return;
+         final String server=serverField.getText().toString().trim();
+@@ -163,7 +188,9 @@
+         io.execute(()->{
+             try{
+                 candidate.health();
++                ui.post(()->setupError.setText("سرور کیوسک شناسایی شد ("+candidate.routeMode()+")؛ در حال احراز هویت مرکز…"));
+                 JSONObject login=candidate.login(username,password);
++                ui.post(()->setupError.setText("ورود نمایشگر تأیید شد؛ در حال دریافت صف پزشکان…"));
+                 String newToken=login.getString("token"),newCenter=login.getString("centerId");
+                 JSONObject state=candidate.state(newToken,newCenter);
+                 vault.saveSession(candidate.origin(),username,newCenter,login.optString("centerName","مرکز باستیان"),newToken);
+@@ -241,8 +268,13 @@
+                     // Always validate role+center identity on updates, never trust a partial poll as full state.
+                     response=currentApi.state(validToken,centerId);
+                 }
++                // Keepalive errors must not hide a valid queue snapshot.
++                // The authenticated state/poll response remains the authority for session validity.
+                 if(System.currentTimeMillis()-lastKeepaliveMs>12*3600*1000L){
+-                    currentApi.keepalive(validToken);lastKeepaliveMs=System.currentTimeMillis();
++                    try{currentApi.keepalive(validToken);lastKeepaliveMs=System.currentTimeMillis();}
++                    catch(KioskApi.ApiException keepaliveError){
++                        if(keepaliveError.httpStatus==401 || keepaliveError.httpStatus==403) throw keepaliveError;
++                    }
+                 }
+                 final JSONObject result=response;
+                 ui.post(()->{
+@@ -281,19 +313,19 @@
+         if(statusText==null)return;
+         if(!connected&&mediaPanel!=null)mediaPanel.stop();
+         if(connected){
+-            statusText.setText("● اتصال امن برقرار است  ·  همگام‌سازی خودکار صف فعال");statusText.setTextColor(CYAN);
++            statusText.setText("● اتصال HTTPS به سامانه برقرار است · "+(api==null?"":api.routeMode())+" · همگام‌سازی فعال");statusText.setTextColor(CYAN);
+         }else{
+             statusText.setText("⚠ ارتباط با سرور برقرار نیست — داده‌های پیشین ممکن است قدیمی باشند"+(error.isEmpty()?"":" | "+error));
+             statusText.setTextColor(YELLOW);
+         }
+         if(footerText!=null){
+             String updated=lastSyncedMs>0?new SimpleDateFormat("HH:mm:ss",Locale.ROOT){{setTimeZone(TimeZone.getTimeZone("Asia/Tehran"));}}.format(new Date(lastSyncedMs)):"بدون دریافت قبلی";
+-            footerText.setText("آخرین داده معتبر: "+updated+"  |  باستیان کیوسک R105  |  اتصال مستقیم HTTPS");
++            footerText.setText("آخرین داده معتبر: "+updated+"  |  باستیان کیوسک R107  |  اتصال مستقیم HTTPS");
+         }
+     }
+     private void rebuildCards(){
+         if(cardHost==null)return;
+-        if(mediaPanel!=null&&api!=null)mediaPanel.configure(lastState,api.origin(),token,connected);
++        if(mediaPanel!=null&&api!=null)mediaPanel.configure(lastState,api,token,connected);
+         cardHost.removeAllViews();
+         if(lastState==null){
+             emptyCard("در حال برقراری ارتباط ایمن با مرکز", "لطفاً کمی بعد دوباره بررسی کنید");return;
+@@ -392,15 +424,23 @@
+     private static String humanError(Exception e){
+         if(e instanceof KioskApi.ApiException){
+             KioskApi.ApiException a=(KioskApi.ApiException)e;
+-            if(a.httpStatus==401)return "نشست منقضی یا نامعتبر شده است";
+-            if(a.httpStatus==404)return "مسیر API در سرور پیدا نشد؛ آدرس را بررسی کنید";
+-            return a.getMessage()==null?"خطای سرور ("+a.httpStatus+")":a.getMessage();
++            if("login".equals(a.phase)) {
++                if(a.httpStatus==404)return "نام کاربری مرکز در سامانه پیدا نشد؛ نام کاربری خود مرکز را وارد کنید، نه نام مدیر یا پزشک";
++                if(a.httpStatus==401)return "رمز حساب نمایشگر مرکز اشتباه است؛ رمز اختصاصی مرکز را بررسی کنید";
++                if(a.httpStatus==403)return "مرکز غیرفعال است یا اجازه ورود نمایشگر ندارد: "+a.getMessage();
++            }
++            if("state".equals(a.phase)||"poll".equals(a.phase)) {
++                if(a.httpStatus==401)return "نشست نمایشگر منقضی یا باطل شده است؛ مجدداً وارد شوید";
++                if(a.httpStatus==403)return "سرور اجازه دریافت صف این مرکز را نداد: "+a.getMessage();
++            }
++            if(a.httpStatus==404)return "مسیر API یافت نشد ("+a.phase+")؛ نشانی نصب کیوسک را بررسی کنید";
++            return a.getMessage()==null?"خطای سرور ("+a.httpStatus+") در مرحله "+a.phase:a.getMessage();
+         }
+         String m=e.getMessage()==null?"":e.getMessage();
+-        if(e instanceof java.net.UnknownHostException)return "دامنه سرور پیدا نشد؛ DNS یا اینترنت را بررسی کنید";
++        if(e instanceof java.net.UnknownHostException)return "دامنه سرور پیدا نشد؛ DNS یا اتصال اینترنت این دستگاه را بررسی کنید";
+         if(e instanceof java.net.SocketTimeoutException)return "سرور در مهلت مشخص پاسخ نداد";
+-        if(e instanceof javax.net.ssl.SSLException)return "گواهی امنیتی HTTPS سرور قابل تأیید نیست";
+-        if(e instanceof java.net.ConnectException)return "اتصال به سرور برقرار نشد؛ شبکه یا سرور را بررسی کنید";
+-        return m.isEmpty()?"ارتباط با سامانه برقرار نشد":m;
++        if(e instanceof javax.net.ssl.SSLException)return "ارتباط امن HTTPS برقرار نشد؛ گواهی سرور و ساعت دستگاه را بررسی کنید";
++        if(e instanceof java.net.ConnectException)return "سرور از این دستگاه قابل دسترسی نیست؛ اینترنت و آدرس کیوسک را بررسی کنید";
++        return m.isEmpty()?"ارتباط با سامانه برقرار نشد؛ اینترنت و گواهی HTTPS را بررسی کنید":m;
+     }
+ }
+--- a/app/src/main/java/ir/bastiyan/kiosk/display/MediaPanel.java
++++ b/app/src/main/java/ir/bastiyan/kiosk/display/MediaPanel.java
+@@ -38,7 +38,8 @@
+     private final TextView overlay;
+     private final Runnable advance=new Runnable(){@Override public void run(){next();}};
+     private boolean enabled=false,ducked=false,visible=false;
+-    private String signature="",origin="",token="";
++    private String signature="",token="";
++    private KioskApi api;
+     private int index=-1,failures=0,generation=0;
+     private VideoView video;
+     private MediaPlayer videoPlayer;
+@@ -57,7 +58,7 @@
+         if(visible==value)return;
+         visible=value;setVisibility(value?View.VISIBLE:View.GONE);visibility.changed(value);
+     }
+-    void configure(JSONObject state,String allowedOrigin,String bearerToken,boolean connected){
++    void configure(JSONObject state,KioskApi client,String bearerToken,boolean connected){
+         if(!connected||state==null){stop();return;}
+         JSONObject settings=state.optJSONObject("settings");
+         JSONObject display=settings==null?null:settings.optJSONObject("displaySettings");
+@@ -74,7 +75,7 @@
+         }
+         if(next.isEmpty()){stop();return;}
+         String sigValue=sig.toString();
+-        origin=allowedOrigin;token=bearerToken;
++        api=client;token=bearerToken;
+         normalVolume=(float)Math.max(0,Math.min(1,display.optDouble("mediaVolume",0.7)));
+         setVideoVolume();
+         if(enabled&&sigValue.equals(signature))return;
+@@ -101,7 +102,7 @@
+         op.leftMargin=30;op.rightMargin=30;addView(overlay,op);
+     }
+     private void loadImage(Clip clip,int expected){
+-        final String requestUrl=origin+clip.url,headerToken=token;
++        final String requestUrl=api.mediaUrl(clip.url),headerToken=token;
+         downloads.execute(()->{
+             Bitmap bitmap=null;
+             HttpURLConnection conn=null;
+@@ -149,7 +150,7 @@
+             });
+             video.setOnCompletionListener(mp->{if(expected==generation)ui.post(advance);});
+             video.setOnErrorListener((mp,what,extra)->{if(expected==generation)ui.post(this::failed);return true;});
+-            video.setVideoURI(Uri.parse(origin+clip.url));
++            video.setVideoURI(Uri.parse(api.mediaUrl(clip.url)));
+         }catch(Exception ignored){failed();}
+     }
+     private void setVideoVolume(){
+--- a/tests/EndpointResolverTest.java
++++ b/tests/EndpointResolverTest.java
+@@ -0,0 +1,24 @@
++import ir.bastiyan.kiosk.display.EndpointResolver;
++public class EndpointResolverTest {
++    static void equal(String expected,String actual) {
++        if(!expected.equals(actual)) throw new AssertionError("expected="+expected+" actual="+actual);
++    }
++    static void reject(String value){
++        try{EndpointResolver.normalizeBase(value);throw new AssertionError("Accepted invalid URL "+value);}
++        catch(IllegalArgumentException expected){}
++    }
++    public static void main(String[] args){
++        equal("https://example.ir",EndpointResolver.normalizeBase("https://EXAMPLE.IR/tv"));
++        equal("https://example.ir",EndpointResolver.normalizeBase("https://example.ir/api/health"));
++        equal("https://example.ir",EndpointResolver.normalizeBase("https://example.ir/api.php?route=health"));
++        equal("https://example.ir",EndpointResolver.normalizeBase("https://example.ir/login"));
++        equal("https://example.ir/clinic",EndpointResolver.normalizeBase("https://example.ir/clinic/tv"));
++        equal("https://example.ir/clinic",EndpointResolver.normalizeBase("https://example.ir/clinic/api.php?route=health"));
++        equal("https://example.ir/clinic/api/health",EndpointResolver.endpoint("https://example.ir/clinic",false,"health"));
++        equal("https://example.ir/clinic/api.php?route=health",EndpointResolver.endpoint("https://example.ir/clinic",true,"health"));
++        equal("https://example.ir/clinic/api.php?route=sync/poll&version=123",EndpointResolver.endpoint("https://example.ir/clinic",true,"sync/poll?version=123"));
++        equal("https://example.ir/clinic/api.php?route=media/file&centerId=123&mediaId=a-b",EndpointResolver.media("https://example.ir/clinic",true,"/api/media/file?centerId=123&mediaId=a-b"));
++        for(String s:new String[]{"http://example.ir","https://user:pass@example.ir/","https://example.ir/login?token=secret","https://example.ir/%2e%2e/api","https://example.ir/../bad","javascript:alert(1)"}) reject(s);
++        System.out.println("PASS 16 endpoint/HTTPS tests");
++    }
++}
