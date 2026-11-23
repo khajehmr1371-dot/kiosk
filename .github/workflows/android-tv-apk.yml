@@ -42,8 +42,11 @@ jobs:
       - name: Install Android SDK platform and build-tools
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+          SDKMGR=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -x "$SDKMGR"
+          echo "Using SDK manager: $SDKMGR"
+          yes | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+          "$SDKMGR" --sdk_root="$ANDROID_HOME" --install 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build native Android APK (signed for pilot installation)
         shell: bash
         working-directory: ${{ runner.temp }}/source/Bastiyan-Android-TV-Native-R105
