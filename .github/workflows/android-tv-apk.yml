@@ -1,0 +1,66 @@
+name: Build Bastiyan Native Android TV APK
+
+on:
+  push:
+    paths:
+      - 'android-source/**'
+      - '.github/workflows/android-tv-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout source archive
+        uses: actions/checkout@v4
+      - name: Verify source archive integrity
+        shell: bash
+        run: |
+          echo 'db784dc944be38958e2fe36184cd73ecd4ae1f9511fe4a8d545fc198174ba23a  android-source/Bastiyan-Kiosk-AndroidTV-Native-R105-SOURCE.zip' | sha256sum --check --status
+          unzip -t android-source/Bastiyan-Kiosk-AndroidTV-Native-R105-SOURCE.zip | tail -1
+          mkdir -p "$RUNNER_TEMP/source"
+          unzip -q android-source/Bastiyan-Kiosk-AndroidTV-Native-R105-SOURCE.zip -d "$RUNNER_TEMP/source"
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK platform and build-tools
+        run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build native Android APK (signed for pilot installation)
+        shell: bash
+        working-directory: ${{ runner.temp }}/source/Bastiyan-Android-TV-Native-R105
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Validate generated APK and build readable deliverables
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$RUNNER_TEMP/source/Bastiyan-Android-TV-Native-R105/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          unzip -t "$APK" | tail -1
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > /tmp/bastiyan-apk-badging.txt
+          grep "package: name='ir.bastiyan.kiosk.display'" /tmp/bastiyan-apk-badging.txt
+          grep "leanback-launcher" /tmp/bastiyan-apk-badging.txt
+          mkdir -p dist
+          cp "$APK" dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk
+          sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk > dist/SHA256SUMS.txt
+          cp /tmp/bastiyan-apk-badging.txt dist/apk-badging.txt
+          echo 'Installable debug-signed pilot build. No installed browser, Chrome, WebView2 or Android Studio required on the Android TV. API connection needs a reachable HTTPS kiosk server.' > dist/README.txt
+      - name: Upload real Android APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bastiyan-AndroidTV-Native-R105-real-APK
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
