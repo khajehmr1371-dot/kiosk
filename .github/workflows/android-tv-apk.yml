@@ -29,14 +29,21 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Use Android SDK already provisioned on GitHub runner
+        shell: bash
+        run: |
+          test -n "$ANDROID_HOME"
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" || command -v sdkmanager
+          echo "ANDROID_HOME=$ANDROID_HOME"
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
       - name: Install Android SDK platform and build-tools
-        run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build native Android APK (signed for pilot installation)
         shell: bash
         working-directory: ${{ runner.temp }}/source/Bastiyan-Android-TV-Native-R105
@@ -51,7 +58,7 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$APK"
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > /tmp/bastiyan-apk-badging.txt
           grep "package: name='ir.bastiyan.kiosk.display'" /tmp/bastiyan-apk-badging.txt
-          grep "leanback-launcher" /tmp/bastiyan-apk-badging.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml | grep -q "android.intent.category.LEANBACK_LAUNCHER"
           mkdir -p dist
           cp "$APK" dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk
           sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk > dist/SHA256SUMS.txt
