@@ -1,9 +1,10 @@
-name: Build Bastiyan Native Android TV APK
+name: Build Bastiyan Native Android TV APK R107
 
 on:
   push:
     paths:
       - 'android-source/**'
+      - 'android-r107/**'
       - '.github/workflows/android-tv-apk.yml'
   workflow_dispatch:
 
@@ -24,11 +25,29 @@ jobs:
           unzip -t android-source/Bastiyan-Kiosk-AndroidTV-Native-R105-SOURCE.zip | tail -1
           mkdir -p "$RUNNER_TEMP/source"
           unzip -q android-source/Bastiyan-Kiosk-AndroidTV-Native-R105-SOURCE.zip -d "$RUNNER_TEMP/source"
+      - name: Apply R107 connection fix to approved R105 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/source/Bastiyan-Android-TV-Native-R105"
+          (cd "$APP" && patch --batch -p1 < "$GITHUB_WORKSPACE/android-r107/connection-fix.patch")
+          test -f "$APP/app/src/main/java/ir/bastiyan/kiosk/display/EndpointResolver.java"
+          grep -q 'X-Session-Token' "$APP/app/src/main/java/ir/bastiyan/kiosk/display/KioskApi.java"
+          grep -q 'versionCode 107' "$APP/app/build.gradle"
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+      - name: Test native HTTPS endpoint resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/source/Bastiyan-Android-TV-Native-R105"
+          mkdir -p "$RUNNER_TEMP/bk-qa"
+          javac -d "$RUNNER_TEMP/bk-qa" "$APP/app/src/main/java/ir/bastiyan/kiosk/display/EndpointResolver.java" "$APP/tests/EndpointResolverTest.java"
+          java -cp "$RUNNER_TEMP/bk-qa" EndpointResolverTest
       - name: Use Android SDK already provisioned on GitHub runner
         shell: bash
         run: |
@@ -62,15 +81,16 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > /tmp/bastiyan-apk-badging.txt
           grep "package: name='ir.bastiyan.kiosk.display'" /tmp/bastiyan-apk-badging.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml | grep -q "android.intent.category.LEANBACK_LAUNCHER"
+          grep -q "versionCode='107'" /tmp/bastiyan-apk-badging.txt
           mkdir -p dist
-          cp "$APK" dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk
-          sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R105-PILOT.apk > dist/SHA256SUMS.txt
+          cp "$APK" dist/Bastiyan-Kiosk-AndroidTV-Native-R107-PILOT.apk
+          sha256sum dist/Bastiyan-Kiosk-AndroidTV-Native-R107-PILOT.apk > dist/SHA256SUMS.txt
           cp /tmp/bastiyan-apk-badging.txt dist/apk-badging.txt
-          echo 'Installable debug-signed pilot build. No installed browser, Chrome, WebView2 or Android Studio required on the Android TV. API connection needs a reachable HTTPS kiosk server.' > dist/README.txt
+          echo 'R107: dual API path and X-Session-Token fallback. Installable debug-signed pilot build. No installed browser, Chrome, WebView2 or Android Studio required on the Android TV. API connection needs a reachable HTTPS kiosk server.' > dist/README.txt
       - name: Upload real Android APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Bastiyan-AndroidTV-Native-R105-real-APK
+          name: Bastiyan-AndroidTV-Native-R107-real-APK
           path: dist/*
           if-no-files-found: error
           retention-days: 90
